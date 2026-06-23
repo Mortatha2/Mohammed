@@ -1,0 +1,1278 @@
+<!DOCTYPE html>
+<html>
+<head>
+	<meta http-equiv="content-type" content="text/html; charset=utf-8"/>
+	<title></title>
+	<meta name="generator" content="LibreOffice 26.2.2.2 (Linux)"/>
+	<meta name="created" content="00:00:00"/>
+	<meta name="changed" content="00:00:00"/>
+	<style type="text/css">
+		@page { size: 8.5in 11in; margin: 0.79in }
+		p { margin-bottom: 0.1in; line-height: 115%; background: transparent }
+		pre { background: transparent }
+		pre.western { font-family: "Liberation Mono", monospace; font-size: 10pt }
+		pre.cjk { font-family: "Noto Sans Mono CJK SC", monospace; font-size: 10pt }
+		pre.ctl { font-family: "Liberation Mono", monospace; font-size: 10pt }
+	</style>
+</head>
+<body lang="en-US" link="#000080" vlink="#800000" dir="ltr"><pre class="western">import { useState, useEffect, useRef } from &quot;react&quot;;
+
+/* ----------------------------------------------------------------------------
+   A&amp;A QUALITY AUTO — Sales &amp; Service · Arlington, TX
+   Performance-house build:
+   - Animated entrance + mouse-parallax hero, ambient beams + grain
+   - Infinite marquee, count-up instrument gauges, chrome headlines
+   - Featured-vehicle spotlight, scroll-reveal everywhere
+   - Full inventory CRUD, owner mode (passcode), persistent via window.storage
+---------------------------------------------------------------------------- */
+
+const INV_PREFIX = &quot;inventory:&quot;;
+const SETTINGS_KEY = &quot;config:site&quot;;
+
+const DEFAULT_SETTINGS = {
+  phone: &quot;817-633-5000&quot;,
+  address: &quot;2925 E Abram St, Arlington, TX 76010&quot;,
+  hours: &quot;Open 7 days a week · 8:00 AM – 7:00 PM&quot;,
+  passcode: &quot;aa2925&quot;,
+  heroImage: &quot;&quot;,
+  heroHeadline: &quot;Built to drive.\nKept on the road.&quot;,
+};
+
+const hasStorage = () =&gt;
+  typeof window !== &quot;undefined&quot; &amp;&amp;
+  window.storage &amp;&amp;
+  typeof window.storage.get === &quot;function&quot;;
+
+const money = (n) =&gt; {
+  const v = Number(n);
+  if (!v || isNaN(v)) return &quot;Call for price&quot;;
+  return &quot;$&quot; + v.toLocaleString(&quot;en-US&quot;);
+};
+const miles = (n) =&gt; {
+  const v = Number(n);
+  if (!v || isNaN(v)) return &quot;—&quot;;
+  return v.toLocaleString(&quot;en-US&quot;) + &quot; mi&quot;;
+};
+const telHref = (p) =&gt; &quot;tel:+1&quot; + (p || &quot;&quot;).replace(/[^0-9]/g, &quot;&quot;);
+const mapHref = (a) =&gt; &quot;https://maps.google.com/?q=&quot; + encodeURIComponent(a || &quot;&quot;);
+const newId = () =&gt; &quot;car_&quot; + Date.now() + Math.random().toString(36).slice(2, 7);
+
+const STATUS = {
+  available: { label: &quot;Available&quot;, dot: &quot;av&quot; },
+  pending: { label: &quot;Sale Pending&quot;, dot: &quot;pe&quot; },
+  sold: { label: &quot;Sold&quot;, dot: &quot;so&quot; },
+};
+
+const EMPTY_FORM = {
+  id: null, year: &quot;&quot;, make: &quot;&quot;, model: &quot;&quot;, trim: &quot;&quot;, price: &quot;&quot;, mileage: &quot;&quot;,
+  transmission: &quot;&quot;, drivetrain: &quot;&quot;, fuel: &quot;&quot;, exterior: &quot;&quot;, interior: &quot;&quot;, vin: &quot;&quot;,
+  status: &quot;available&quot;, featured: false, description: &quot;&quot;, images: [],
+};
+
+function compressImage(file, maxDim = 1100, quality = 0.72) {
+  return new Promise((resolve, reject) =&gt; {
+    const reader = new FileReader();
+    reader.onload = (e) =&gt; {
+      const img = new Image();
+      img.onload = () =&gt; {
+        let { width, height } = img;
+        if (width &gt; height &amp;&amp; width &gt; maxDim) {
+          height = Math.round((height * maxDim) / width); width = maxDim;
+        } else if (height &gt; maxDim) {
+          width = Math.round((width * maxDim) / height); height = maxDim;
+        }
+        const c = document.createElement(&quot;canvas&quot;);
+        c.width = width; c.height = height;
+        c.getContext(&quot;2d&quot;).drawImage(img, 0, 0, width, height);
+        try { resolve(c.toDataURL(&quot;image/jpeg&quot;, quality)); } catch (err) { reject(err); }
+      };
+      img.onerror = reject; img.src = e.target.result;
+    };
+    reader.onerror = reject; reader.readAsDataURL(file);
+  });
+}
+
+/* ---- scroll reveal ---- */
+function useReveal(deps) {
+  useEffect(() =&gt; {
+    if (typeof document === &quot;undefined&quot;) return;
+    const els = Array.from(document.querySelectorAll(&quot;[data-reveal]:not(.in)&quot;));
+    if (!(&quot;IntersectionObserver&quot; in window)) {
+      els.forEach((e) =&gt; e.classList.add(&quot;in&quot;));
+      return;
+    }
+    const io = new IntersectionObserver(
+      (entries) =&gt; {
+        entries.forEach((en) =&gt; {
+          if (en.isIntersecting) {
+            en.target.classList.add(&quot;in&quot;);
+            io.unobserve(en.target);
+          }
+        });
+      },
+      { threshold: 0.12, rootMargin: &quot;0px 0px -40px 0px&quot; }
+    );
+    els.forEach((e) =&gt; io.observe(e));
+    return () =&gt; io.disconnect();
+  }, deps);
+}
+
+/* ---- count up ---- */
+function CountUp({ to, dur = 1500, decimals = 0, suffix = &quot;&quot;, prefix = &quot;&quot; }) {
+  const [val, setVal] = useState(0);
+  const ref = useRef(null);
+  const done = useRef(false);
+  useEffect(() =&gt; {
+    const el = ref.current;
+    if (!el) return;
+    const run = () =&gt; {
+      if (done.current) return;
+      done.current = true;
+      const t0 = performance.now();
+      const tick = (t) =&gt; {
+        const p = Math.min(1, (t - t0) / dur);
+        const e = 1 - Math.pow(1 - p, 3);
+        setVal(to * e);
+        if (p &lt; 1) requestAnimationFrame(tick);
+        else setVal(to);
+      };
+      requestAnimationFrame(tick);
+    };
+    if (!(&quot;IntersectionObserver&quot; in window)) { run(); return; }
+    const io = new IntersectionObserver(
+      (es) =&gt; es.forEach((en) =&gt; en.isIntersecting &amp;&amp; run()),
+      { threshold: 0.4 }
+    );
+    io.observe(el);
+    return () =&gt; io.disconnect();
+  }, [to]);
+  const shown = decimals ? val.toFixed(decimals) : Math.round(val).toLocaleString();
+  return &lt;span ref={ref}&gt;{prefix}{shown}{suffix}&lt;/span&gt;;
+}
+
+const CarIcon = ({ size = 48 }) =&gt; (
+  &lt;svg width={size} height={size} viewBox=&quot;0 0 64 64&quot; fill=&quot;none&quot; aria-hidden=&quot;true&quot;&gt;
+    &lt;path d=&quot;M8 40v6a2 2 0 0 0 2 2h4a2 2 0 0 0 2-2v-2h32v2a2 2 0 0 0 2 2h4a2 2 0 0 0 2-2v-6&quot;
+      stroke=&quot;currentColor&quot; strokeWidth=&quot;2.5&quot; strokeLinecap=&quot;round&quot; /&gt;
+    &lt;path d=&quot;M8 40l3-12a5 5 0 0 1 4.7-3.4h32.6A5 5 0 0 1 53 28l3 12M8 40h48&quot;
+      stroke=&quot;currentColor&quot; strokeWidth=&quot;2.5&quot; strokeLinejoin=&quot;round&quot; /&gt;
+    &lt;circle cx=&quot;19&quot; cy=&quot;40&quot; r=&quot;4&quot; stroke=&quot;currentColor&quot; strokeWidth=&quot;2.5&quot; /&gt;
+    &lt;circle cx=&quot;45&quot; cy=&quot;40&quot; r=&quot;4&quot; stroke=&quot;currentColor&quot; strokeWidth=&quot;2.5&quot; /&gt;
+  &lt;/svg&gt;
+);
+
+const Slashes = ({ n = 2 }) =&gt; (
+  &lt;span className=&quot;aa-slashes&quot; aria-hidden=&quot;true&quot;&gt;
+    {Array.from({ length: n }).map((_, i) =&gt; &lt;span key={i} /&gt;)}
+  &lt;/span&gt;
+);
+
+const Logo = () =&gt; (
+  &lt;span className=&quot;aa-logo&quot;&gt;
+    &lt;span className=&quot;aa-logo-text&quot;&gt;A&amp;amp;A&lt;/span&gt;
+    &lt;Slashes /&gt;
+  &lt;/span&gt;
+);
+
+const MARQUEE = [
+  &quot;Quality Used Cars&quot;, &quot;Full-Service Shop&quot;, &quot;Body &amp; Collision&quot;, &quot;New &amp; Used Tires&quot;,
+  &quot;Brakes &amp; Alignment&quot;, &quot;Oil &amp; Maintenance&quot;, &quot;Financing Available&quot;, &quot;Trade-Ins Welcome&quot;,
+];
+const Marquee = () =&gt; (
+  &lt;div className=&quot;aa-marquee&quot; aria-hidden=&quot;true&quot;&gt;
+    &lt;div className=&quot;aa-marquee-track&quot;&gt;
+      {[...MARQUEE, ...MARQUEE].map((m, i) =&gt; (
+        &lt;span className=&quot;aa-mItem&quot; key={i}&gt;
+          {m}
+          &lt;span className=&quot;aa-mSlash&quot; /&gt;
+        &lt;/span&gt;
+      ))}
+    &lt;/div&gt;
+  &lt;/div&gt;
+);
+
+export default function App() {
+  const [cars, setCars] = useState([]);
+  const [settings, setSettings] = useState(DEFAULT_SETTINGS);
+  const [loading, setLoading] = useState(true);
+  const [storageOn, setStorageOn] = useState(true);
+
+  const [owner, setOwner] = useState(false);
+  const [authOpen, setAuthOpen] = useState(false);
+  const [authInput, setAuthInput] = useState(&quot;&quot;);
+  const [authError, setAuthError] = useState(&quot;&quot;);
+
+  const [formOpen, setFormOpen] = useState(false);
+  const [form, setForm] = useState(EMPTY_FORM);
+  const [busy, setBusy] = useState(false);
+  const [imgUrl, setImgUrl] = useState(&quot;&quot;);
+
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [draftSettings, setDraftSettings] = useState(DEFAULT_SETTINGS);
+
+  const [search, setSearch] = useState(&quot;&quot;);
+  const [statusFilter, setStatusFilter] = useState(&quot;all&quot;);
+  const [sort, setSort] = useState(&quot;featured&quot;);
+  const [toast, setToast] = useState(&quot;&quot;);
+  const [scrolled, setScrolled] = useState(false);
+
+  const fileRef = useRef(null);
+  const heroFileRef = useRef(null);
+  const heroRef = useRef(null);
+  const rafRef = useRef(0);
+
+  useEffect(() =&gt; {
+    let active = true;
+    (async () =&gt; {
+      if (!hasStorage()) { setStorageOn(false); setLoading(false); return; }
+      try {
+        try {
+          const r = await window.storage.get(SETTINGS_KEY, true);
+          if (active &amp;&amp; r &amp;&amp; r.value) setSettings({ ...DEFAULT_SETTINGS, ...JSON.parse(r.value) });
+        } catch (e) {}
+        let keys = [];
+        try {
+          const list = await window.storage.list(INV_PREFIX, true);
+          keys = (list &amp;&amp; list.keys ? list.keys : []).map((k) =&gt;
+            typeof k === &quot;string&quot; ? k : k.key || k.name);
+        } catch (e) {}
+        const results = await Promise.allSettled(keys.map((k) =&gt; window.storage.get(k, true)));
+        const loaded = [];
+        for (const res of results) {
+          if (res.status === &quot;fulfilled&quot; &amp;&amp; res.value &amp;&amp; res.value.value) {
+            try { loaded.push(JSON.parse(res.value.value)); } catch (e) {}
+          }
+        }
+        if (active) setCars(loaded);
+      } catch (e) { if (active) setStorageOn(false); }
+      if (active) setLoading(false);
+    })();
+    return () =&gt; { active = false; };
+  }, []);
+
+  useEffect(() =&gt; {
+    let ticking = false;
+    const onScroll = () =&gt; {
+      if (ticking) return;
+      ticking = true;
+      requestAnimationFrame(() =&gt; { setScrolled(window.scrollY &gt; 40); ticking = false; });
+    };
+    window.addEventListener(&quot;scroll&quot;, onScroll, { passive: true });
+    return () =&gt; window.removeEventListener(&quot;scroll&quot;, onScroll);
+  }, []);
+
+  const visibleKey = `${loading}-${cars.length}-${search}-${statusFilter}-${sort}-${owner}`;
+  useReveal([visibleKey]);
+
+  const flash = (m) =&gt; { setToast(m); setTimeout(() =&gt; setToast(&quot;&quot;), 2600); };
+
+  function onHeroMove(e) {
+    const el = heroRef.current;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    const x = (e.clientX - r.left) / r.width - 0.5;
+    const y = (e.clientY - r.top) / r.height - 0.5;
+    cancelAnimationFrame(rafRef.current);
+    rafRef.current = requestAnimationFrame(() =&gt; {
+      el.style.setProperty(&quot;--mx&quot;, x.toFixed(3));
+      el.style.setProperty(&quot;--my&quot;, y.toFixed(3));
+    });
+  }
+  function onHeroLeave() {
+    const el = heroRef.current;
+    if (!el) return;
+    el.style.setProperty(&quot;--mx&quot;, &quot;0&quot;);
+    el.style.setProperty(&quot;--my&quot;, &quot;0&quot;);
+  }
+
+  async function persistCar(car) {
+    if (hasStorage()) {
+      try { await window.storage.set(INV_PREFIX + car.id, JSON.stringify(car), true); }
+      catch (e) { flash(&quot;Couldn't save to storage — kept for this session only.&quot;); }
+    }
+  }
+  async function saveCar() {
+    if (!form.make.trim() || !form.model.trim()) { flash(&quot;Please add at least a make and model.&quot;); return; }
+    setBusy(true);
+    const car = { ...form, id: form.id || newId(), createdAt: form.createdAt || Date.now(), updatedAt: Date.now() };
+    await persistCar(car);
+    setCars((prev) =&gt; {
+      const i = prev.findIndex((c) =&gt; c.id === car.id);
+      if (i === -1) return [car, ...prev];
+      const copy = [...prev]; copy[i] = car; return copy;
+    });
+    setBusy(false); setFormOpen(false); setForm(EMPTY_FORM);
+    flash(form.id ? &quot;Listing updated.&quot; : &quot;Vehicle added.&quot;);
+  }
+  async function removeCar(id) {
+    if (!window.confirm(&quot;Remove this vehicle from your inventory? This can't be undone.&quot;)) return;
+    if (hasStorage()) { try { await window.storage.delete(INV_PREFIX + id, true); } catch (e) {} }
+    setCars((prev) =&gt; prev.filter((c) =&gt; c.id !== id));
+    flash(&quot;Listing removed.&quot;);
+  }
+  function openAdd() { setForm(EMPTY_FORM); setImgUrl(&quot;&quot;); setFormOpen(true); }
+  function openEdit(car) { setForm({ ...EMPTY_FORM, ...car }); setImgUrl(&quot;&quot;); setFormOpen(true); }
+
+  async function onFiles(e) {
+    const files = Array.from(e.target.files || []);
+    if (!files.length) return;
+    const room = 8 - form.images.length;
+    if (room &lt;= 0) { flash(&quot;Up to 8 photos per vehicle.&quot;); return; }
+    const out = [];
+    for (const f of files.slice(0, room)) { try { out.push(await compressImage(f)); } catch (err) {} }
+    setForm((f) =&gt; ({ ...f, images: [...f.images, ...out] }));
+    if (fileRef.current) fileRef.current.value = &quot;&quot;;
+  }
+  function addImgUrl() {
+    const u = imgUrl.trim();
+    if (!u) return;
+    if (form.images.length &gt;= 8) { flash(&quot;Up to 8 photos per vehicle.&quot;); return; }
+    setForm((f) =&gt; ({ ...f, images: [...f.images, u] })); setImgUrl(&quot;&quot;);
+  }
+  function removeImg(idx) { setForm((f) =&gt; ({ ...f, images: f.images.filter((_, i) =&gt; i !== idx) })); }
+
+  async function onHeroFile(e) {
+    const f = (e.target.files || [])[0];
+    if (!f) return;
+    try { const data = await compressImage(f, 1700, 0.78); setDraftSettings((s) =&gt; ({ ...s, heroImage: data })); } catch (err) {}
+    if (heroFileRef.current) heroFileRef.current.value = &quot;&quot;;
+  }
+
+  function tryAuth() {
+    if (authInput === (settings.passcode || DEFAULT_SETTINGS.passcode)) {
+      setOwner(true); setAuthOpen(false); setAuthInput(&quot;&quot;); setAuthError(&quot;&quot;);
+      flash(&quot;Owner mode on. You can now manage your site.&quot;);
+    } else setAuthError(&quot;That passcode didn't match.&quot;);
+  }
+  async function saveSettings() {
+    setSettings(draftSettings);
+    if (hasStorage()) { try { await window.storage.set(SETTINGS_KEY, JSON.stringify(draftSettings), true); } catch (e) {} }
+    setSettingsOpen(false); flash(&quot;Site info updated.&quot;);
+  }
+
+  function pickModel(car) {
+    setSearch([car.make, car.model].filter(Boolean).join(&quot; &quot;));
+    setStatusFilter(&quot;all&quot;);
+    const el = document.getElementById(&quot;inventory&quot;);
+    if (el) el.scrollIntoView({ behavior: &quot;smooth&quot; });
+  }
+
+  const visible = cars
+    .filter((c) =&gt; statusFilter === &quot;all&quot; || c.status === statusFilter)
+    .filter((c) =&gt; {
+      if (!search.trim()) return true;
+      const q = search.toLowerCase();
+      return [c.year, c.make, c.model, c.trim, c.description].filter(Boolean).join(&quot; &quot;).toLowerCase().includes(q);
+    })
+    .sort((a, b) =&gt; {
+      if (sort === &quot;priceLow&quot;) return (a.price || 1e12) - (b.price || 1e12);
+      if (sort === &quot;priceHigh&quot;) return (b.price || 0) - (a.price || 0);
+      if (sort === &quot;mileageLow&quot;) return (a.mileage || 1e12) - (b.mileage || 1e12);
+      if (sort === &quot;newest&quot;) return (b.createdAt || 0) - (a.createdAt || 0);
+      if (!!b.featured !== !!a.featured) return b.featured ? 1 : -1;
+      return (b.createdAt || 0) - (a.createdAt || 0);
+    });
+
+  const availableCount = cars.filter((c) =&gt; c.status === &quot;available&quot;).length;
+  const lineup = (availableCount ? cars.filter((c) =&gt; c.status === &quot;available&quot;) : cars).slice(0, 10);
+  const spotlight =
+    cars.find((c) =&gt; c.featured &amp;&amp; c.status !== &quot;sold&quot;) ||
+    cars.find((c) =&gt; c.status === &quot;available&quot;) ||
+    cars[0] ||
+    null;
+  const heroLines = (settings.heroHeadline || DEFAULT_SETTINGS.heroHeadline).split(&quot;\n&quot;);
+
+  return (
+    &lt;div className=&quot;aa-root&quot;&gt;
+      &lt;style&gt;{CSS}&lt;/style&gt;
+      &lt;div className=&quot;aa-grain&quot; aria-hidden=&quot;true&quot; /&gt;
+
+      {/* ===== Header ===== */}
+      &lt;header className={&quot;aa-header&quot; + (scrolled ? &quot; scrolled&quot; : &quot;&quot;)}&gt;
+        &lt;div className=&quot;aa-wrap aa-headrow&quot;&gt;
+          &lt;a href=&quot;#top&quot; className=&quot;aa-brand&quot;&gt;
+            &lt;Logo /&gt;
+            &lt;span className=&quot;aa-brand-sub&quot;&gt;Quality Auto · Sales &amp;amp; Service&lt;/span&gt;
+          &lt;/a&gt;
+          &lt;nav className=&quot;aa-nav&quot;&gt;
+            &lt;a href=&quot;#inventory&quot;&gt;Inventory&lt;/a&gt;
+            &lt;a href=&quot;#lineup&quot;&gt;Lineup&lt;/a&gt;
+            &lt;a href=&quot;#services&quot;&gt;Service&lt;/a&gt;
+            &lt;a href=&quot;#visit&quot;&gt;Find Us&lt;/a&gt;
+          &lt;/nav&gt;
+          &lt;a className=&quot;aa-callbtn&quot; href={telHref(settings.phone)}&gt;
+            &lt;PhoneGlyph /&gt;&lt;span&gt;{settings.phone}&lt;/span&gt;
+          &lt;/a&gt;
+        &lt;/div&gt;
+      &lt;/header&gt;
+
+      {/* ===== Hero ===== */}
+      &lt;section
+        className=&quot;aa-hero&quot;
+        id=&quot;top&quot;
+        ref={heroRef}
+        onMouseMove={onHeroMove}
+        onMouseLeave={onHeroLeave}
+      &gt;
+        &lt;div
+          className={&quot;aa-hero-bg&quot; + (settings.heroImage ? &quot;&quot; : &quot; empty&quot;)}
+          style={settings.heroImage ? { backgroundImage: `url(${settings.heroImage})` } : {}}
+        /&gt;
+        &lt;div className=&quot;aa-hero-scrim&quot; aria-hidden=&quot;true&quot; /&gt;
+        &lt;div className=&quot;aa-beam b1&quot; aria-hidden=&quot;true&quot; /&gt;
+        &lt;div className=&quot;aa-beam b2&quot; aria-hidden=&quot;true&quot; /&gt;
+        &lt;span className=&quot;aa-shard s1&quot; aria-hidden=&quot;true&quot; /&gt;
+        &lt;span className=&quot;aa-shard s2&quot; aria-hidden=&quot;true&quot; /&gt;
+        &lt;span className=&quot;aa-shard s3&quot; aria-hidden=&quot;true&quot; /&gt;
+
+        &lt;div className=&quot;aa-wrap aa-hero-wrap&quot;&gt;
+          &lt;div className=&quot;aa-hero-content&quot;&gt;
+            &lt;span className=&quot;aa-eyebrow hero-eb&quot;&gt;
+              &lt;span className=&quot;aa-live&quot; /&gt; Arlington, Texas · Family-owned
+            &lt;/span&gt;
+            &lt;h1 className=&quot;aa-h1&quot;&gt;
+              {heroLines.map((l, i) =&gt; (
+                &lt;span key={i} className={&quot;aa-h1-line &quot; + (i === heroLines.length - 1 ? &quot;accent&quot; : &quot;chrome&quot;)}&gt;
+                  {l}
+                &lt;/span&gt;
+              ))}
+            &lt;/h1&gt;
+            &lt;p className=&quot;aa-lead&quot;&gt;
+              Inspected pre-owned vehicles and a full-service shop under one roof — sales,
+              body work, tires, brakes, and routine repair, done right.
+            &lt;/p&gt;
+            &lt;div className=&quot;aa-hero-cta&quot;&gt;
+              &lt;a href=&quot;#inventory&quot; className=&quot;aa-btn aa-btn-red&quot;&gt;Browse inventory&lt;/a&gt;
+              &lt;a href=&quot;#services&quot; className=&quot;aa-btn aa-btn-glass&quot;&gt;Our service shop&lt;/a&gt;
+            &lt;/div&gt;
+
+            &lt;div className=&quot;aa-gauges&quot;&gt;
+              &lt;div className=&quot;aa-gauge&quot;&gt;
+                &lt;span className=&quot;aa-gauge-n&quot;&gt;&lt;CountUp to={availableCount} /&gt;&lt;/span&gt;
+                &lt;span className=&quot;aa-gauge-l&quot;&gt;In stock&lt;/span&gt;
+              &lt;/div&gt;
+              &lt;div className=&quot;aa-gauge&quot;&gt;
+                &lt;span className=&quot;aa-gauge-n&quot;&gt;&lt;CountUp to={4.2} decimals={1} suffix=&quot;★&quot; /&gt;&lt;/span&gt;
+                &lt;span className=&quot;aa-gauge-l&quot;&gt;52 reviews&lt;/span&gt;
+              &lt;/div&gt;
+              &lt;div className=&quot;aa-gauge&quot;&gt;
+                &lt;span className=&quot;aa-gauge-n&quot;&gt;&lt;CountUp to={7} /&gt;&lt;/span&gt;
+                &lt;span className=&quot;aa-gauge-l&quot;&gt;Days open&lt;/span&gt;
+              &lt;/div&gt;
+            &lt;/div&gt;
+          &lt;/div&gt;
+        &lt;/div&gt;
+
+        &lt;a href=&quot;#lineup&quot; className=&quot;aa-scrollcue&quot; aria-label=&quot;Scroll down&quot;&gt;
+          &lt;span /&gt;
+        &lt;/a&gt;
+      &lt;/section&gt;
+
+      {/* ===== Marquee ===== */}
+      &lt;Marquee /&gt;
+
+      {/* ===== Featured spotlight ===== */}
+      {spotlight &amp;&amp; (
+        &lt;section className=&quot;aa-spotlight&quot; data-reveal&gt;
+          &lt;div className=&quot;aa-spot-num&quot; aria-hidden=&quot;true&quot;&gt;A&amp;amp;A&lt;/div&gt;
+          &lt;div className=&quot;aa-wrap aa-spot-grid&quot;&gt;
+            &lt;div className=&quot;aa-spot-media&quot;&gt;
+              {spotlight.images &amp;&amp; spotlight.images[0] ? (
+                &lt;img src={spotlight.images[0]} alt=&quot;&quot; /&gt;
+              ) : (
+                &lt;div className=&quot;aa-spot-noimg&quot;&gt;&lt;CarIcon size={90} /&gt;&lt;/div&gt;
+              )}
+              &lt;span className=&quot;aa-spot-flag&quot;&gt;Featured&lt;/span&gt;
+            &lt;/div&gt;
+            &lt;div className=&quot;aa-spot-info&quot;&gt;
+              &lt;span className=&quot;aa-eyebrow&quot;&gt;&lt;Slashes /&gt; Spotlight of the week&lt;/span&gt;
+              &lt;h2 className=&quot;aa-spot-title&quot;&gt;
+                {[spotlight.year, spotlight.make, spotlight.model].filter(Boolean).join(&quot; &quot;)}
+              &lt;/h2&gt;
+              {spotlight.trim &amp;&amp; &lt;p className=&quot;aa-spot-trim&quot;&gt;{spotlight.trim}&lt;/p&gt;}
+              &lt;div className=&quot;aa-spot-price&quot;&gt;{money(spotlight.price)}&lt;/div&gt;
+              &lt;div className=&quot;aa-spot-specs&quot;&gt;
+                &lt;SpecBig k=&quot;Odometer&quot; v={miles(spotlight.mileage)} /&gt;
+                &lt;SpecBig k=&quot;Drivetrain&quot; v={spotlight.drivetrain || &quot;—&quot;} /&gt;
+                &lt;SpecBig k=&quot;Transmission&quot; v={spotlight.transmission || &quot;—&quot;} /&gt;
+                &lt;SpecBig k=&quot;Fuel&quot; v={spotlight.fuel || &quot;—&quot;} /&gt;
+              &lt;/div&gt;
+              {spotlight.description &amp;&amp; &lt;p className=&quot;aa-spot-desc&quot;&gt;{spotlight.description}&lt;/p&gt;}
+              &lt;div className=&quot;aa-hero-cta&quot;&gt;
+                &lt;a href={telHref(settings.phone)} className=&quot;aa-btn aa-btn-red&quot;&gt;Ask about this vehicle&lt;/a&gt;
+                &lt;a href=&quot;#inventory&quot; className=&quot;aa-btn aa-btn-outline-light&quot;&gt;See all inventory&lt;/a&gt;
+              &lt;/div&gt;
+            &lt;/div&gt;
+          &lt;/div&gt;
+        &lt;/section&gt;
+      )}
+
+      {/* ===== Lineup strip ===== */}
+      {lineup.length &gt; 0 &amp;&amp; (
+        &lt;section className=&quot;aa-lineup&quot; id=&quot;lineup&quot;&gt;
+          &lt;div className=&quot;aa-wrap&quot;&gt;
+            &lt;div className=&quot;aa-sec-head&quot; data-reveal&gt;
+              &lt;div&gt;
+                &lt;span className=&quot;aa-eyebrow dark&quot;&gt;&lt;Slashes /&gt; The lineup&lt;/span&gt;
+                &lt;h2 className=&quot;aa-h2&quot;&gt;On the lot now&lt;/h2&gt;
+              &lt;/div&gt;
+            &lt;/div&gt;
+            &lt;div className=&quot;aa-lineup-row&quot; data-reveal&gt;
+              {lineup.map((car) =&gt; (
+                &lt;button key={car.id} className=&quot;aa-lineup-item&quot; onClick={() =&gt; pickModel(car)}&gt;
+                  &lt;div className=&quot;aa-lineup-img&quot;&gt;
+                    {car.images &amp;&amp; car.images[0] ? &lt;img src={car.images[0]} alt=&quot;&quot; loading=&quot;lazy&quot; /&gt; : &lt;CarIcon size={46} /&gt;}
+                  &lt;/div&gt;
+                  &lt;span className=&quot;aa-lineup-name&quot;&gt;{[car.make, car.model].filter(Boolean).join(&quot; &quot;) || &quot;Vehicle&quot;}&lt;/span&gt;
+                  &lt;span className=&quot;aa-lineup-sub&quot;&gt;{[car.year, money(car.price)].filter(Boolean).join(&quot; · &quot;)}&lt;/span&gt;
+                  &lt;span className=&quot;aa-lineup-go&quot;&gt;View →&lt;/span&gt;
+                &lt;/button&gt;
+              ))}
+            &lt;/div&gt;
+          &lt;/div&gt;
+        &lt;/section&gt;
+      )}
+
+      {/* ===== Inventory ===== */}
+      &lt;section className=&quot;aa-section aa-inventory&quot; id=&quot;inventory&quot;&gt;
+        &lt;div className=&quot;aa-wrap&quot;&gt;
+          &lt;div className=&quot;aa-sec-head&quot; data-reveal&gt;
+            &lt;div&gt;
+              &lt;span className=&quot;aa-eyebrow dark&quot;&gt;&lt;Slashes /&gt; Inventory&lt;/span&gt;
+              &lt;h2 className=&quot;aa-h2&quot;&gt;Find your next vehicle&lt;/h2&gt;
+            &lt;/div&gt;
+            {owner &amp;&amp; &lt;button className=&quot;aa-btn aa-btn-red aa-add&quot; onClick={openAdd}&gt;+ Add a vehicle&lt;/button&gt;}
+          &lt;/div&gt;
+
+          &lt;div className=&quot;aa-controls&quot; data-reveal&gt;
+            &lt;input className=&quot;aa-search&quot; placeholder=&quot;Search make, model, year…&quot; value={search} onChange={(e) =&gt; setSearch(e.target.value)} /&gt;
+            &lt;div className=&quot;aa-chips&quot;&gt;
+              {[[&quot;all&quot;, &quot;All&quot;], [&quot;available&quot;, &quot;Available&quot;], [&quot;pending&quot;, &quot;Pending&quot;], [&quot;sold&quot;, &quot;Sold&quot;]].map(([k, l]) =&gt; (
+                &lt;button key={k} className={&quot;aa-chip&quot; + (statusFilter === k ? &quot; on&quot; : &quot;&quot;)} onClick={() =&gt; setStatusFilter(k)}&gt;{l}&lt;/button&gt;
+              ))}
+            &lt;/div&gt;
+            &lt;select className=&quot;aa-select&quot; value={sort} onChange={(e) =&gt; setSort(e.target.value)}&gt;
+              &lt;option value=&quot;featured&quot;&gt;Featured first&lt;/option&gt;
+              &lt;option value=&quot;newest&quot;&gt;Newest&lt;/option&gt;
+              &lt;option value=&quot;priceLow&quot;&gt;Price: low to high&lt;/option&gt;
+              &lt;option value=&quot;priceHigh&quot;&gt;Price: high to low&lt;/option&gt;
+              &lt;option value=&quot;mileageLow&quot;&gt;Lowest mileage&lt;/option&gt;
+            &lt;/select&gt;
+          &lt;/div&gt;
+
+          {loading ? (
+            &lt;div className=&quot;aa-empty&quot;&gt;Loading inventory…&lt;/div&gt;
+          ) : visible.length === 0 ? (
+            &lt;div className=&quot;aa-empty&quot; data-reveal&gt;
+              {cars.length === 0 ? (
+                &lt;&gt;
+                  &lt;CarIcon size={56} /&gt;
+                  &lt;p&gt;No vehicles listed yet&lt;/p&gt;
+                  {owner ? (
+                    &lt;button className=&quot;aa-btn aa-btn-red&quot; onClick={openAdd}&gt;+ Add your first vehicle&lt;/button&gt;
+                  ) : (
+                    &lt;span className=&quot;aa-empty-sub&quot;&gt;New arrivals every week. Call {settings.phone} for what's coming in.&lt;/span&gt;
+                  )}
+                &lt;/&gt;
+              ) : (&lt;p&gt;No vehicles match those filters&lt;/p&gt;)}
+            &lt;/div&gt;
+          ) : (
+            &lt;div className=&quot;aa-grid&quot;&gt;
+              {visible.map((car, i) =&gt; (
+                &lt;CarCard
+                  key={car.id}
+                  car={car}
+                  owner={owner}
+                  phone={settings.phone}
+                  index={i}
+                  onEdit={() =&gt; openEdit(car)}
+                  onDelete={() =&gt; removeCar(car.id)}
+                /&gt;
+              ))}
+            &lt;/div&gt;
+          )}
+        &lt;/div&gt;
+      &lt;/section&gt;
+
+      {/* ===== Services ===== */}
+      &lt;section className=&quot;aa-section aa-services&quot; id=&quot;services&quot;&gt;
+        &lt;div className=&quot;aa-services-slash&quot; aria-hidden=&quot;true&quot; /&gt;
+        &lt;div className=&quot;aa-grid-lines&quot; aria-hidden=&quot;true&quot; /&gt;
+        &lt;div className=&quot;aa-wrap&quot;&gt;
+          &lt;div data-reveal&gt;
+            &lt;span className=&quot;aa-eyebrow&quot;&gt;&lt;Slashes /&gt; In the shop&lt;/span&gt;
+            &lt;h2 className=&quot;aa-h2 chrome&quot;&gt;More than a lot&lt;/h2&gt;
+            &lt;p className=&quot;aa-services-lead&quot;&gt;
+              We don't just sell vehicles — we keep them running. Straight estimates, quality
+              parts, and technicians who treat your vehicle like their own.
+            &lt;/p&gt;
+          &lt;/div&gt;
+          &lt;div className=&quot;aa-svc-grid&quot;&gt;
+            {SERVICES.map((s, i) =&gt; (
+              &lt;div className=&quot;aa-svc&quot; key={i} data-reveal style={{ transitionDelay: `${i * 60}ms` }}&gt;
+                &lt;div className=&quot;aa-svc-ico&quot;&gt;{s.icon}&lt;/div&gt;
+                &lt;h3&gt;{s.title}&lt;/h3&gt;
+                &lt;p&gt;{s.body}&lt;/p&gt;
+                &lt;span className=&quot;aa-svc-edge&quot; aria-hidden=&quot;true&quot; /&gt;
+              &lt;/div&gt;
+            ))}
+          &lt;/div&gt;
+          &lt;div className=&quot;aa-svc-cta&quot; data-reveal&gt;
+            &lt;span&gt;Need an estimate or a repair scheduled?&lt;/span&gt;
+            &lt;a href={telHref(settings.phone)} className=&quot;aa-btn aa-btn-red&quot;&gt;Call the shop · {settings.phone}&lt;/a&gt;
+          &lt;/div&gt;
+        &lt;/div&gt;
+      &lt;/section&gt;
+
+      {/* ===== Trust band ===== */}
+      &lt;section className=&quot;aa-trust&quot;&gt;
+        &lt;div className=&quot;aa-wrap aa-trust-grid&quot;&gt;
+          &lt;div className=&quot;aa-trust-item&quot; data-reveal&gt;
+            &lt;span className=&quot;aa-trust-n&quot;&gt;&lt;CountUp to={4.2} decimals={1} /&gt;&lt;/span&gt;
+            &lt;span className=&quot;aa-trust-l&quot;&gt;Star rating&lt;/span&gt;
+          &lt;/div&gt;
+          &lt;div className=&quot;aa-trust-item&quot; data-reveal style={{ transitionDelay: &quot;80ms&quot; }}&gt;
+            &lt;span className=&quot;aa-trust-n&quot;&gt;&lt;CountUp to={52} suffix=&quot;+&quot; /&gt;&lt;/span&gt;
+            &lt;span className=&quot;aa-trust-l&quot;&gt;Happy reviewers&lt;/span&gt;
+          &lt;/div&gt;
+          &lt;div className=&quot;aa-trust-item&quot; data-reveal style={{ transitionDelay: &quot;160ms&quot; }}&gt;
+            &lt;span className=&quot;aa-trust-n&quot;&gt;7&lt;/span&gt;
+            &lt;span className=&quot;aa-trust-l&quot;&gt;Days a week&lt;/span&gt;
+          &lt;/div&gt;
+          &lt;div className=&quot;aa-trust-item&quot; data-reveal style={{ transitionDelay: &quot;240ms&quot; }}&gt;
+            &lt;span className=&quot;aa-trust-n&quot;&gt;1&lt;/span&gt;
+            &lt;span className=&quot;aa-trust-l&quot;&gt;Family, one roof&lt;/span&gt;
+          &lt;/div&gt;
+        &lt;/div&gt;
+      &lt;/section&gt;
+
+      {/* ===== Visit ===== */}
+      &lt;section className=&quot;aa-section aa-visit&quot; id=&quot;visit&quot;&gt;
+        &lt;div className=&quot;aa-wrap aa-visit-grid&quot;&gt;
+          &lt;div data-reveal&gt;
+            &lt;span className=&quot;aa-eyebrow dark&quot;&gt;&lt;Slashes /&gt; Come see us&lt;/span&gt;
+            &lt;h2 className=&quot;aa-h2&quot;&gt;Visit the lot&lt;/h2&gt;
+            &lt;ul className=&quot;aa-info&quot;&gt;
+              &lt;li&gt;&lt;span className=&quot;aa-info-k&quot;&gt;Address&lt;/span&gt;
+                &lt;a href={mapHref(settings.address)} target=&quot;_blank&quot; rel=&quot;noreferrer&quot;&gt;{settings.address}&lt;/a&gt;&lt;/li&gt;
+              &lt;li&gt;&lt;span className=&quot;aa-info-k&quot;&gt;Phone&lt;/span&gt;
+                &lt;a href={telHref(settings.phone)}&gt;{settings.phone}&lt;/a&gt;&lt;/li&gt;
+              &lt;li&gt;&lt;span className=&quot;aa-info-k&quot;&gt;Hours&lt;/span&gt;&lt;span&gt;{settings.hours}&lt;/span&gt;&lt;/li&gt;
+            &lt;/ul&gt;
+            &lt;div className=&quot;aa-hero-cta&quot;&gt;
+              &lt;a href={mapHref(settings.address)} target=&quot;_blank&quot; rel=&quot;noreferrer&quot; className=&quot;aa-btn aa-btn-red&quot;&gt;Get directions&lt;/a&gt;
+              &lt;a href={telHref(settings.phone)} className=&quot;aa-btn aa-btn-outline&quot;&gt;Call us&lt;/a&gt;
+            &lt;/div&gt;
+          &lt;/div&gt;
+          &lt;div className=&quot;aa-visit-card&quot; data-reveal&gt;
+            &lt;Logo /&gt;
+            &lt;p&gt;Buying or repairing, you deal with the same family every time. We keep it straight,
+              keep it fair, and stand behind every vehicle we sell.&lt;/p&gt;
+            &lt;div className=&quot;aa-visit-tags&quot;&gt;
+              &lt;span&gt;Financing available&lt;/span&gt;&lt;span&gt;Trade-ins welcome&lt;/span&gt;&lt;span&gt;Full-service shop&lt;/span&gt;
+            &lt;/div&gt;
+          &lt;/div&gt;
+        &lt;/div&gt;
+      &lt;/section&gt;
+
+      {/* ===== Footer ===== */}
+      &lt;footer className=&quot;aa-footer&quot;&gt;
+        &lt;div className=&quot;aa-foot-bigtext&quot; aria-hidden=&quot;true&quot;&gt;A&amp;amp;A QUALITY AUTO&lt;/div&gt;
+        &lt;div className=&quot;aa-wrap aa-footrow&quot;&gt;
+          &lt;div&gt;
+            &lt;Logo /&gt;
+            &lt;p className=&quot;aa-foot-sub&quot;&gt;{settings.address}&lt;/p&gt;
+            &lt;p className=&quot;aa-foot-sub&quot;&gt;{settings.phone}&lt;/p&gt;
+            &lt;p className=&quot;aa-foot-sub&quot;&gt;{settings.hours}&lt;/p&gt;
+          &lt;/div&gt;
+          &lt;div className=&quot;aa-foot-actions&quot;&gt;
+            {!owner ? (
+              &lt;button className=&quot;aa-owner-link&quot; onClick={() =&gt; setAuthOpen(true)}&gt;Owner sign-in&lt;/button&gt;
+            ) : (
+              &lt;div className=&quot;aa-owner-tools&quot;&gt;
+                &lt;span className=&quot;aa-owner-on&quot;&gt;● Owner mode&lt;/span&gt;
+                &lt;button className=&quot;aa-owner-link&quot; onClick={() =&gt; { setDraftSettings(settings); setSettingsOpen(true); }}&gt;Site info&lt;/button&gt;
+                &lt;button className=&quot;aa-owner-link&quot; onClick={() =&gt; setOwner(false)}&gt;Sign out&lt;/button&gt;
+              &lt;/div&gt;
+            )}
+            &lt;span className=&quot;aa-foot-copy&quot;&gt;© {new Date().getFullYear()} A&amp;amp;A Quality Auto. All rights reserved.&lt;/span&gt;
+          &lt;/div&gt;
+        &lt;/div&gt;
+        {!storageOn &amp;&amp; (
+          &lt;div className=&quot;aa-wrap aa-storage-note&quot;&gt;
+            Heads up: saved storage isn't available in this preview, so changes won't persist between sessions here. Once published, they will.
+          &lt;/div&gt;
+        )}
+      &lt;/footer&gt;
+
+      {/* ===== Modals ===== */}
+      {authOpen &amp;&amp; (
+        &lt;Modal onClose={() =&gt; setAuthOpen(false)} title=&quot;Owner sign-in&quot;&gt;
+          &lt;p className=&quot;aa-modal-sub&quot;&gt;Enter your passcode to manage inventory and site info.&lt;/p&gt;
+          &lt;input className=&quot;aa-field&quot; type=&quot;password&quot; placeholder=&quot;Passcode&quot; value={authInput} autoFocus
+            onChange={(e) =&gt; { setAuthInput(e.target.value); setAuthError(&quot;&quot;); }}
+            onKeyDown={(e) =&gt; e.key === &quot;Enter&quot; &amp;&amp; tryAuth()} /&gt;
+          {authError &amp;&amp; &lt;div className=&quot;aa-err&quot;&gt;{authError}&lt;/div&gt;}
+          &lt;div className=&quot;aa-modal-foot&quot;&gt;
+            &lt;button className=&quot;aa-btn aa-btn-outline&quot; onClick={() =&gt; setAuthOpen(false)}&gt;Cancel&lt;/button&gt;
+            &lt;button className=&quot;aa-btn aa-btn-red&quot; onClick={tryAuth}&gt;Sign in&lt;/button&gt;
+          &lt;/div&gt;
+        &lt;/Modal&gt;
+      )}
+
+      {settingsOpen &amp;&amp; (
+        &lt;Modal onClose={() =&gt; setSettingsOpen(false)} title=&quot;Site info&quot;&gt;
+          &lt;label className=&quot;aa-lab&quot;&gt;Hero headline (two lines)&lt;/label&gt;
+          &lt;textarea className=&quot;aa-field aa-textarea&quot; rows={2} value={draftSettings.heroHeadline}
+            onChange={(e) =&gt; setDraftSettings({ ...draftSettings, heroHeadline: e.target.value })} /&gt;
+          &lt;label className=&quot;aa-lab&quot;&gt;Hero photo&lt;/label&gt;
+          &lt;div className=&quot;aa-hero-upload&quot;&gt;
+            &lt;button className=&quot;aa-btn aa-btn-dark sm&quot; onClick={() =&gt; heroFileRef.current &amp;&amp; heroFileRef.current.click()}&gt;
+              {draftSettings.heroImage ? &quot;Replace photo&quot; : &quot;Upload photo&quot;}
+            &lt;/button&gt;
+            &lt;input ref={heroFileRef} type=&quot;file&quot; accept=&quot;image/*&quot; hidden onChange={onHeroFile} /&gt;
+            {draftSettings.heroImage &amp;&amp; (
+              &lt;button className=&quot;aa-btn aa-btn-outline sm&quot; onClick={() =&gt; setDraftSettings({ ...draftSettings, heroImage: &quot;&quot; })}&gt;Remove&lt;/button&gt;
+            )}
+          &lt;/div&gt;
+          {draftSettings.heroImage &amp;&amp; &lt;div className=&quot;aa-hero-preview&quot;&gt;&lt;img src={draftSettings.heroImage} alt=&quot;&quot; /&gt;&lt;/div&gt;}
+          &lt;label className=&quot;aa-lab&quot;&gt;Phone&lt;/label&gt;
+          &lt;input className=&quot;aa-field&quot; value={draftSettings.phone} onChange={(e) =&gt; setDraftSettings({ ...draftSettings, phone: e.target.value })} /&gt;
+          &lt;label className=&quot;aa-lab&quot;&gt;Address&lt;/label&gt;
+          &lt;input className=&quot;aa-field&quot; value={draftSettings.address} onChange={(e) =&gt; setDraftSettings({ ...draftSettings, address: e.target.value })} /&gt;
+          &lt;label className=&quot;aa-lab&quot;&gt;Hours&lt;/label&gt;
+          &lt;input className=&quot;aa-field&quot; value={draftSettings.hours} onChange={(e) =&gt; setDraftSettings({ ...draftSettings, hours: e.target.value })} /&gt;
+          &lt;label className=&quot;aa-lab&quot;&gt;Owner passcode&lt;/label&gt;
+          &lt;input className=&quot;aa-field&quot; value={draftSettings.passcode} onChange={(e) =&gt; setDraftSettings({ ...draftSettings, passcode: e.target.value })} /&gt;
+          &lt;div className=&quot;aa-modal-foot&quot;&gt;
+            &lt;button className=&quot;aa-btn aa-btn-outline&quot; onClick={() =&gt; setSettingsOpen(false)}&gt;Cancel&lt;/button&gt;
+            &lt;button className=&quot;aa-btn aa-btn-red&quot; onClick={saveSettings}&gt;Save&lt;/button&gt;
+          &lt;/div&gt;
+        &lt;/Modal&gt;
+      )}
+
+      {formOpen &amp;&amp; (
+        &lt;Modal wide onClose={() =&gt; setFormOpen(false)} title={form.id ? &quot;Edit listing&quot; : &quot;Add a vehicle&quot;}&gt;
+          &lt;div className=&quot;aa-form-grid&quot;&gt;
+            &lt;Field label=&quot;Year&quot;&gt;&lt;input className=&quot;aa-field&quot; value={form.year} inputMode=&quot;numeric&quot; onChange={(e) =&gt; setForm({ ...form, year: e.target.value })} /&gt;&lt;/Field&gt;
+            &lt;Field label=&quot;Make *&quot;&gt;&lt;input className=&quot;aa-field&quot; value={form.make} onChange={(e) =&gt; setForm({ ...form, make: e.target.value })} /&gt;&lt;/Field&gt;
+            &lt;Field label=&quot;Model *&quot;&gt;&lt;input className=&quot;aa-field&quot; value={form.model} onChange={(e) =&gt; setForm({ ...form, model: e.target.value })} /&gt;&lt;/Field&gt;
+            &lt;Field label=&quot;Trim&quot;&gt;&lt;input className=&quot;aa-field&quot; value={form.trim} onChange={(e) =&gt; setForm({ ...form, trim: e.target.value })} /&gt;&lt;/Field&gt;
+            &lt;Field label=&quot;Price ($)&quot;&gt;&lt;input className=&quot;aa-field&quot; value={form.price} inputMode=&quot;numeric&quot; onChange={(e) =&gt; setForm({ ...form, price: e.target.value })} /&gt;&lt;/Field&gt;
+            &lt;Field label=&quot;Mileage&quot;&gt;&lt;input className=&quot;aa-field&quot; value={form.mileage} inputMode=&quot;numeric&quot; onChange={(e) =&gt; setForm({ ...form, mileage: e.target.value })} /&gt;&lt;/Field&gt;
+            &lt;Field label=&quot;Transmission&quot;&gt;&lt;input className=&quot;aa-field&quot; value={form.transmission} placeholder=&quot;Automatic / Manual&quot; onChange={(e) =&gt; setForm({ ...form, transmission: e.target.value })} /&gt;&lt;/Field&gt;
+            &lt;Field label=&quot;Drivetrain&quot;&gt;&lt;input className=&quot;aa-field&quot; value={form.drivetrain} placeholder=&quot;FWD / AWD / 4x4&quot; onChange={(e) =&gt; setForm({ ...form, drivetrain: e.target.value })} /&gt;&lt;/Field&gt;
+            &lt;Field label=&quot;Fuel&quot;&gt;&lt;input className=&quot;aa-field&quot; value={form.fuel} placeholder=&quot;Gas / Diesel / Hybrid&quot; onChange={(e) =&gt; setForm({ ...form, fuel: e.target.value })} /&gt;&lt;/Field&gt;
+            &lt;Field label=&quot;Exterior color&quot;&gt;&lt;input className=&quot;aa-field&quot; value={form.exterior} onChange={(e) =&gt; setForm({ ...form, exterior: e.target.value })} /&gt;&lt;/Field&gt;
+            &lt;Field label=&quot;Interior color&quot;&gt;&lt;input className=&quot;aa-field&quot; value={form.interior} onChange={(e) =&gt; setForm({ ...form, interior: e.target.value })} /&gt;&lt;/Field&gt;
+            &lt;Field label=&quot;VIN (optional)&quot;&gt;&lt;input className=&quot;aa-field&quot; value={form.vin} onChange={(e) =&gt; setForm({ ...form, vin: e.target.value })} /&gt;&lt;/Field&gt;
+            &lt;Field label=&quot;Status&quot;&gt;
+              &lt;select className=&quot;aa-field&quot; value={form.status} onChange={(e) =&gt; setForm({ ...form, status: e.target.value })}&gt;
+                &lt;option value=&quot;available&quot;&gt;Available&lt;/option&gt;&lt;option value=&quot;pending&quot;&gt;Sale Pending&lt;/option&gt;&lt;option value=&quot;sold&quot;&gt;Sold&lt;/option&gt;
+              &lt;/select&gt;
+            &lt;/Field&gt;
+            &lt;Field label=&quot;Featured&quot;&gt;
+              &lt;label className=&quot;aa-toggle&quot;&gt;
+                &lt;input type=&quot;checkbox&quot; checked={form.featured} onChange={(e) =&gt; setForm({ ...form, featured: e.target.checked })} /&gt;
+                &lt;span&gt;Pin to top, spotlight &amp;amp; lineup&lt;/span&gt;
+              &lt;/label&gt;
+            &lt;/Field&gt;
+          &lt;/div&gt;
+          &lt;Field label=&quot;Description&quot; full&gt;
+            &lt;textarea className=&quot;aa-field aa-textarea&quot; rows={3} value={form.description}
+              placeholder=&quot;Condition, options, recent service, financing notes…&quot;
+              onChange={(e) =&gt; setForm({ ...form, description: e.target.value })} /&gt;
+          &lt;/Field&gt;
+          &lt;label className=&quot;aa-lab&quot;&gt;Photos (up to 8)&lt;/label&gt;
+          &lt;div className=&quot;aa-photo-tools&quot;&gt;
+            &lt;button className=&quot;aa-btn aa-btn-dark sm&quot; onClick={() =&gt; fileRef.current &amp;&amp; fileRef.current.click()}&gt;Upload photos&lt;/button&gt;
+            &lt;input ref={fileRef} type=&quot;file&quot; accept=&quot;image/*&quot; multiple hidden onChange={onFiles} /&gt;
+            &lt;div className=&quot;aa-url-add&quot;&gt;
+              &lt;input className=&quot;aa-field sm&quot; placeholder=&quot;…or paste an image URL&quot; value={imgUrl}
+                onChange={(e) =&gt; setImgUrl(e.target.value)}
+                onKeyDown={(e) =&gt; e.key === &quot;Enter&quot; &amp;&amp; (e.preventDefault(), addImgUrl())} /&gt;
+              &lt;button className=&quot;aa-btn aa-btn-outline sm&quot; onClick={addImgUrl}&gt;Add&lt;/button&gt;
+            &lt;/div&gt;
+          &lt;/div&gt;
+          {form.images.length &gt; 0 &amp;&amp; (
+            &lt;div className=&quot;aa-thumbs&quot;&gt;
+              {form.images.map((src, i) =&gt; (
+                &lt;div className=&quot;aa-thumb&quot; key={i}&gt;
+                  &lt;img src={src} alt=&quot;&quot; /&gt;
+                  &lt;button onClick={() =&gt; removeImg(i)} aria-label=&quot;Remove photo&quot;&gt;×&lt;/button&gt;
+                  {i === 0 &amp;&amp; &lt;span className=&quot;aa-thumb-main&quot;&gt;Cover&lt;/span&gt;}
+                &lt;/div&gt;
+              ))}
+            &lt;/div&gt;
+          )}
+          &lt;div className=&quot;aa-modal-foot&quot;&gt;
+            &lt;button className=&quot;aa-btn aa-btn-outline&quot; onClick={() =&gt; setFormOpen(false)}&gt;Cancel&lt;/button&gt;
+            &lt;button className=&quot;aa-btn aa-btn-red&quot; disabled={busy} onClick={saveCar}&gt;
+              {busy ? &quot;Saving…&quot; : form.id ? &quot;Save changes&quot; : &quot;Add vehicle&quot;}
+            &lt;/button&gt;
+          &lt;/div&gt;
+        &lt;/Modal&gt;
+      )}
+
+      {toast &amp;&amp; &lt;div className=&quot;aa-toast&quot;&gt;{toast}&lt;/div&gt;}
+    &lt;/div&gt;
+  );
+}
+
+function CarCard({ car, owner, phone, index, onEdit, onDelete }) {
+  const [idx, setIdx] = useState(0);
+  const imgs = car.images &amp;&amp; car.images.length ? car.images : [];
+  const st = STATUS[car.status] || STATUS.available;
+  const title = [car.year, car.make, car.model].filter(Boolean).join(&quot; &quot;);
+  return (
+    &lt;article className={&quot;aa-card&quot; + (car.featured ? &quot; feat&quot; : &quot;&quot;)} data-reveal style={{ transitionDelay: `${(index % 3) * 70}ms` }}&gt;
+      &lt;div className=&quot;aa-card-media&quot;&gt;
+        {imgs.length ? (
+          &lt;&gt;
+            &lt;img src={imgs[idx]} alt={title} loading=&quot;lazy&quot; /&gt;
+            {imgs.length &gt; 1 &amp;&amp; (
+              &lt;div className=&quot;aa-dots&quot;&gt;
+                {imgs.map((_, i) =&gt; (
+                  &lt;button key={i} className={&quot;aa-dot&quot; + (i === idx ? &quot; on&quot; : &quot;&quot;)} onClick={() =&gt; setIdx(i)} aria-label={&quot;Photo &quot; + (i + 1)} /&gt;
+                ))}
+              &lt;/div&gt;
+            )}
+          &lt;/&gt;
+        ) : (
+          &lt;div className=&quot;aa-noimg&quot;&gt;&lt;CarIcon size={52} /&gt;&lt;span&gt;Photo coming soon&lt;/span&gt;&lt;/div&gt;
+        )}
+        &lt;span className={&quot;aa-badge &quot; + st.dot}&gt;&lt;i /&gt;{st.label}&lt;/span&gt;
+        {car.featured &amp;&amp; &lt;span className=&quot;aa-feat-tag&quot;&gt;Featured&lt;/span&gt;}
+      &lt;/div&gt;
+      &lt;div className=&quot;aa-card-body&quot;&gt;
+        &lt;h3 className=&quot;aa-car-title&quot;&gt;{title || &quot;Vehicle&quot;}&lt;/h3&gt;
+        {car.trim &amp;&amp; &lt;p className=&quot;aa-car-trim&quot;&gt;{car.trim}&lt;/p&gt;}
+        &lt;div className=&quot;aa-price&quot;&gt;{money(car.price)}&lt;/div&gt;
+        &lt;div className=&quot;aa-specs&quot;&gt;
+          &lt;Spec k=&quot;Odometer&quot; v={miles(car.mileage)} /&gt;
+          &lt;Spec k=&quot;Trans&quot; v={car.transmission || &quot;—&quot;} /&gt;
+          &lt;Spec k=&quot;Drive&quot; v={car.drivetrain || &quot;—&quot;} /&gt;
+          &lt;Spec k=&quot;Fuel&quot; v={car.fuel || &quot;—&quot;} /&gt;
+        &lt;/div&gt;
+        {(car.exterior || car.interior) &amp;&amp; (
+          &lt;p className=&quot;aa-colors&quot;&gt;
+            {car.exterior &amp;&amp; &lt;span&gt;{car.exterior} exterior&lt;/span&gt;}
+            {car.exterior &amp;&amp; car.interior &amp;&amp; &lt;span className=&quot;aa-dot-sep&quot;&gt;·&lt;/span&gt;}
+            {car.interior &amp;&amp; &lt;span&gt;{car.interior} interior&lt;/span&gt;}
+          &lt;/p&gt;
+        )}
+        {car.description &amp;&amp; &lt;p className=&quot;aa-desc&quot;&gt;{car.description}&lt;/p&gt;}
+        &lt;div className=&quot;aa-card-foot&quot;&gt;
+          &lt;a className=&quot;aa-btn aa-btn-red sm&quot; href={telHref(phone)}&gt;Ask about this&lt;/a&gt;
+          {owner &amp;&amp; (
+            &lt;div className=&quot;aa-card-owner&quot;&gt;
+              &lt;button className=&quot;aa-icobtn&quot; onClick={onEdit}&gt;Edit&lt;/button&gt;
+              &lt;button className=&quot;aa-icobtn danger&quot; onClick={onDelete}&gt;Delete&lt;/button&gt;
+            &lt;/div&gt;
+          )}
+        &lt;/div&gt;
+      &lt;/div&gt;
+    &lt;/article&gt;
+  );
+}
+
+const Spec = ({ k, v }) =&gt; (
+  &lt;div className=&quot;aa-spec&quot;&gt;&lt;span className=&quot;aa-spec-k&quot;&gt;{k}&lt;/span&gt;&lt;span className=&quot;aa-spec-v&quot;&gt;{v}&lt;/span&gt;&lt;/div&gt;
+);
+const SpecBig = ({ k, v }) =&gt; (
+  &lt;div className=&quot;aa-specbig&quot;&gt;&lt;span className=&quot;aa-specbig-k&quot;&gt;{k}&lt;/span&gt;&lt;span className=&quot;aa-specbig-v&quot;&gt;{v}&lt;/span&gt;&lt;/div&gt;
+);
+const Field = ({ label, children, full }) =&gt; (
+  &lt;div className={&quot;aa-ffield&quot; + (full ? &quot; full&quot; : &quot;&quot;)}&gt;&lt;label className=&quot;aa-lab&quot;&gt;{label}&lt;/label&gt;{children}&lt;/div&gt;
+);
+function Modal({ title, children, onClose, wide }) {
+  return (
+    &lt;div className=&quot;aa-overlay&quot; onMouseDown={onClose}&gt;
+      &lt;div className={&quot;aa-modal&quot; + (wide ? &quot; wide&quot; : &quot;&quot;)} onMouseDown={(e) =&gt; e.stopPropagation()}&gt;
+        &lt;div className=&quot;aa-modal-head&quot;&gt;&lt;h3&gt;{title}&lt;/h3&gt;&lt;button className=&quot;aa-x&quot; onClick={onClose} aria-label=&quot;Close&quot;&gt;×&lt;/button&gt;&lt;/div&gt;
+        &lt;div className=&quot;aa-modal-body&quot;&gt;{children}&lt;/div&gt;
+      &lt;/div&gt;
+    &lt;/div&gt;
+  );
+}
+const PhoneGlyph = () =&gt; (
+  &lt;svg width=&quot;15&quot; height=&quot;15&quot; viewBox=&quot;0 0 24 24&quot; fill=&quot;none&quot; aria-hidden=&quot;true&quot;&gt;
+    &lt;path d=&quot;M6.5 3h3l1.5 5-2 1.5a12 12 0 0 0 5 5l1.5-2 5 1.5v3a2 2 0 0 1-2 2A16 16 0 0 1 4.5 5a2 2 0 0 1 2-2Z&quot;
+      stroke=&quot;currentColor&quot; strokeWidth=&quot;1.8&quot; strokeLinejoin=&quot;round&quot; /&gt;
+  &lt;/svg&gt;
+);
+const svc = (d) =&gt; &lt;svg width=&quot;26&quot; height=&quot;26&quot; viewBox=&quot;0 0 24 24&quot; fill=&quot;none&quot; aria-hidden=&quot;true&quot;&gt;{d}&lt;/svg&gt;;
+const SERVICES = [
+  { title: &quot;Body &amp; collision&quot;, body: &quot;Dents, panel repair, rust, and full repaints. We make wrecked and worn look right again.&quot;,
+    icon: svc(&lt;path d=&quot;M3 13l2-5h14l2 5v5h-3v-2H6v2H3v-5Zm4 0h10&quot; stroke=&quot;currentColor&quot; strokeWidth=&quot;1.8&quot; strokeLinejoin=&quot;round&quot; /&gt;) },
+  { title: &quot;Tires &amp; wheels&quot;, body: &quot;New and quality used tires, mounting, balancing, rotations, flat repair, and alignments.&quot;,
+    icon: svc(&lt;&gt;&lt;circle cx=&quot;12&quot; cy=&quot;12&quot; r=&quot;8&quot; stroke=&quot;currentColor&quot; strokeWidth=&quot;1.8&quot; /&gt;&lt;circle cx=&quot;12&quot; cy=&quot;12&quot; r=&quot;3&quot; stroke=&quot;currentColor&quot; strokeWidth=&quot;1.8&quot; /&gt;&lt;/&gt;) },
+  { title: &quot;Brakes &amp; suspension&quot;, body: &quot;Pads, rotors, shocks, and struts — so you stop smooth and ride steady.&quot;,
+    icon: svc(&lt;&gt;&lt;circle cx=&quot;12&quot; cy=&quot;12&quot; r=&quot;7&quot; stroke=&quot;currentColor&quot; strokeWidth=&quot;1.8&quot; /&gt;&lt;path d=&quot;M12 5v3M12 16v3M5 12h3M16 12h3&quot; stroke=&quot;currentColor&quot; strokeWidth=&quot;1.8&quot; /&gt;&lt;/&gt;) },
+  { title: &quot;Oil &amp; maintenance&quot;, body: &quot;Oil changes, fluids, filters, tune-ups, and inspections to keep miles trouble-free.&quot;,
+    icon: svc(&lt;path d=&quot;M7 8h7l3 3v5a1 1 0 0 1-1 1H8a1 1 0 0 1-1-1V8Zm0 3h6M5 8l2-3h4&quot; stroke=&quot;currentColor&quot; strokeWidth=&quot;1.8&quot; strokeLinejoin=&quot;round&quot; /&gt;) },
+  { title: &quot;Engine &amp; diagnostics&quot;, body: &quot;Check-engine lights, electrical, A/C, and hard-to-find issues sorted out honestly.&quot;,
+    icon: svc(&lt;path d=&quot;M5 14v-2h2V9h3V7h4v2h2l2 2v3h-2v3H7v-3H5Z&quot; stroke=&quot;currentColor&quot; strokeWidth=&quot;1.8&quot; strokeLinejoin=&quot;round&quot; /&gt;) },
+  { title: &quot;Inspections &amp; general repair&quot;, body: &quot;Pre-purchase checks and everyday fixes. If it's on a vehicle, chances are we handle it.&quot;,
+    icon: svc(&lt;path d=&quot;M14 4l2 2-2 2-2-2 2-2Zm-1 5L5 17l2 2 8-8M9 4H4v5&quot; stroke=&quot;currentColor&quot; strokeWidth=&quot;1.8&quot; strokeLinejoin=&quot;round&quot; /&gt;) },
+];
+
+const CSS = `
+@import url('https://fonts.googleapis.com/css2?family=Saira:wght@400;500;600;700&amp;family=Saira+Condensed:wght@500;600;700;800&amp;family=Spline+Sans+Mono:wght@500;600;700&amp;display=swap');
+
+.aa-root{
+  --bg:#08090c; --panel:#0f1116; --panel2:#14161d; --coal:#13151b; --line:#23262f;
+  --red:#ff2b30; --red-2:#e30c12; --red-d:#c00a0f;
+  --cyan:#34e3e0; --white:#f3f5f8; --mute:#8b92a2; --steel:#5c6373;
+  --paper:#ffffff; --mist:#eef0f3; --ink:#0a0b0e; --line-l:#e3e6ea; --steel-l:#6b7280;
+  --av:#23c55e; --pe:#f0a417; --so:#9aa1b1;
+  --redgrad:linear-gradient(120deg,#ff3b40,#d2070d);
+  font-family:'Saira',system-ui,sans-serif;
+  color:var(--white); background:var(--bg);
+  -webkit-font-smoothing:antialiased; line-height:1.5;
+}
+.aa-root *{box-sizing:border-box;}
+.aa-root ::selection{background:var(--red); color:#fff;}
+.aa-wrap{width:100%; max-width:1240px; margin:0 auto; padding:0 24px;}
+.aa-root a{color:inherit; text-decoration:none;}
+
+/* grain overlay */
+.aa-grain{position:fixed; inset:0; z-index:200; pointer-events:none; opacity:.04; mix-blend-mode:overlay;
+  background-image:url(&quot;data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E&quot;);}
+
+/* slash mark + logo */
+.aa-slashes{display:inline-flex; gap:3px; align-items:center;}
+.aa-slashes span{display:block; width:7px; height:19px; background:var(--redgrad); transform:skewX(-18deg); border-radius:1px;}
+.aa-eyebrow .aa-slashes span{width:5px; height:13px;}
+.aa-logo{display:inline-flex; align-items:center; gap:9px;}
+.aa-logo-text{font-family:'Saira Condensed'; font-weight:800; font-size:30px; letter-spacing:.01em; text-transform:uppercase; line-height:1; color:currentColor;}
+.aa-logo:hover .aa-slashes span{animation:slashKick .5s ease;}
+@keyframes slashKick{50%{transform:skewX(-18deg) translateX(4px);}}
+
+/* header */
+.aa-header{position:sticky; top:0; z-index:60; background:rgba(8,9,12,.55); backdrop-filter:blur(14px) saturate(1.2);
+  border-bottom:1px solid transparent; transition:.3s;}
+.aa-header.scrolled{background:rgba(8,9,12,.9); border-bottom-color:var(--line);}
+.aa-headrow{display:flex; align-items:center; gap:22px; height:74px; transition:.3s;}
+.aa-header.scrolled .aa-headrow{height:62px;}
+.aa-brand{display:flex; align-items:center; gap:14px; margin-right:auto; color:#fff;}
+.aa-brand-sub{font-family:'Saira Condensed'; font-weight:600; font-size:12.5px; letter-spacing:.16em; text-transform:uppercase;
+  color:var(--mute); padding-left:14px; border-left:1px solid #2a2e38;}
+.aa-nav{display:flex; gap:30px;}
+.aa-nav a{position:relative; font-family:'Saira Condensed'; font-weight:600; font-size:15.5px; letter-spacing:.08em; text-transform:uppercase; color:#cdd2dc;}
+.aa-nav a::after{content:&quot;&quot;; position:absolute; left:0; bottom:-6px; height:2px; width:0; background:var(--redgrad); transition:.25s;}
+.aa-nav a:hover{color:#fff;}
+.aa-nav a:hover::after{width:100%;}
+.aa-callbtn{display:inline-flex; align-items:center; gap:8px; color:#fff; font-weight:600; font-size:15px;
+  border:1.5px solid #2e323c; padding:9px 16px; border-radius:3px; transition:.2s;}
+.aa-callbtn:hover{border-color:var(--red); color:var(--red); box-shadow:0 0 0 3px rgba(255,43,48,.12);}
+
+/* hero */
+.aa-hero{position:relative; min-height:88vh; display:flex; align-items:center; overflow:hidden;
+  --mx:0; --my:0; background:var(--bg);}
+.aa-hero-bg{position:absolute; inset:-6%; background-size:cover; background-position:center;
+  transform:translate(calc(var(--mx)*-16px), calc(var(--my)*-16px)) scale(1.08); transition:transform .25s ease-out;}
+.aa-hero-bg.empty{background:
+  radial-gradient(80% 70% at 78% 20%, rgba(255,43,48,.18), transparent 60%),
+  radial-gradient(60% 60% at 20% 90%, rgba(52,227,224,.07), transparent 60%),
+  linear-gradient(160deg,#101319,#06070a);}
+.aa-hero-scrim{position:absolute; inset:0; background:linear-gradient(95deg, rgba(8,9,12,.94) 0%, rgba(8,9,12,.78) 38%, rgba(8,9,12,.30) 70%, rgba(8,9,12,.55) 100%);}
+.aa-beam{position:absolute; top:-30%; height:160%; width:160px; background:linear-gradient(var(--red-2),transparent); opacity:.16;
+  filter:blur(6px); transform:skewX(-16deg); animation:beam 9s ease-in-out infinite;}
+.aa-beam.b1{left:42%;}
+.aa-beam.b2{left:62%; animation-delay:-4s; opacity:.1; background:linear-gradient(var(--cyan),transparent);}
+@keyframes beam{0%,100%{transform:skewX(-16deg) translateX(-10px);}50%{transform:skewX(-16deg) translateX(40px);}}
+.aa-shard{position:absolute; background:var(--redgrad); border-radius:2px; opacity:.85; box-shadow:0 0 30px rgba(255,43,48,.4);}
+.aa-shard.s1{width:18px; height:120px; top:22%; left:48%; transform:skewX(-18deg) translate(calc(var(--mx)*30px), calc(var(--my)*30px)); animation:floaty 7s ease-in-out infinite;}
+.aa-shard.s2{width:10px; height:70px; top:58%; left:40%; opacity:.6; transform:skewX(-18deg) translate(calc(var(--mx)*48px), calc(var(--my)*48px)); animation:floaty 6s ease-in-out infinite reverse;}
+.aa-shard.s3{width:7px; height:46px; top:30%; left:67%; background:var(--cyan); box-shadow:0 0 24px rgba(52,227,224,.4); opacity:.5; transform:skewX(-18deg) translate(calc(var(--mx)*60px), calc(var(--my)*60px)); animation:floaty 8s ease-in-out infinite;}
+@keyframes floaty{0%,100%{margin-top:0;}50%{margin-top:-16px;}}
+.aa-hero-wrap{position:relative; z-index:5; width:100%;}
+.aa-hero-content{max-width:620px; padding:60px 0;}
+.aa-hero-content &gt; *{opacity:0; animation:heroIn .8s cubic-bezier(.2,.7,.2,1) forwards;}
+.aa-hero-content .hero-eb{animation-delay:.05s;}
+.aa-hero-content .aa-h1{animation-delay:.16s;}
+.aa-hero-content .aa-lead{animation-delay:.3s;}
+.aa-hero-content .aa-hero-cta{animation-delay:.42s;}
+.aa-hero-content .aa-gauges{animation-delay:.54s;}
+@keyframes heroIn{from{opacity:0; transform:translateY(22px);} to{opacity:1; transform:none;}}
+.aa-eyebrow{display:inline-flex; align-items:center; gap:10px; font-family:'Saira Condensed'; font-weight:700;
+  font-size:14px; letter-spacing:.18em; text-transform:uppercase; color:#fff; margin-bottom:18px;}
+.aa-eyebrow.dark{color:var(--ink);}
+.aa-live{width:9px; height:9px; border-radius:50%; background:var(--cyan); box-shadow:0 0 0 0 rgba(52,227,224,.6); animation:pulse 2s infinite;}
+@keyframes pulse{0%{box-shadow:0 0 0 0 rgba(52,227,224,.5);}70%{box-shadow:0 0 0 9px rgba(52,227,224,0);}100%{box-shadow:0 0 0 0 rgba(52,227,224,0);}}
+.aa-h1{font-family:'Saira Condensed'; font-weight:800; text-transform:uppercase; letter-spacing:.004em;
+  font-size:clamp(50px,8vw,108px); line-height:.9; margin:0 0 20px;}
+.aa-h1-line{display:block;}
+.aa-h1-line.chrome{background:linear-gradient(180deg,#ffffff 8%,#cfd3da 46%,#9aa0ab 56%,#ffffff 96%);
+  -webkit-background-clip:text; background-clip:text; color:transparent;}
+.aa-h1-line.accent{background:var(--redgrad); -webkit-background-clip:text; background-clip:text; color:transparent;}
+.aa-lead{max-width:480px; font-size:18.5px; color:#c4c9d3; margin:0 0 28px;}
+.aa-hero-cta{display:flex; flex-wrap:wrap; gap:12px;}
+.aa-gauges{display:flex; gap:14px; margin-top:44px;}
+.aa-gauge{position:relative; min-width:118px; padding:16px 18px; background:rgba(18,20,27,.6); border:1px solid var(--line);
+  border-radius:8px; backdrop-filter:blur(6px); overflow:hidden;}
+.aa-gauge::before{content:&quot;&quot;; position:absolute; top:0; left:0; width:100%; height:3px; background:var(--redgrad);}
+.aa-gauge::after{content:&quot;&quot;; position:absolute; right:10px; top:14px; width:30px; height:30px; border-radius:50%;
+  border:2px solid #2a2e38; border-top-color:var(--cyan); opacity:.5;}
+.aa-gauge-n{display:block; font-family:'Spline Sans Mono'; font-weight:700; font-size:34px; color:#fff; line-height:1;}
+.aa-gauge-l{display:block; font-family:'Saira Condensed'; font-weight:600; font-size:12px; letter-spacing:.12em; text-transform:uppercase; color:var(--mute); margin-top:8px;}
+.aa-scrollcue{position:absolute; bottom:22px; left:50%; transform:translateX(-50%); z-index:6; width:26px; height:42px;
+  border:2px solid rgba(255,255,255,.4); border-radius:14px; display:flex; justify-content:center; padding-top:7px;}
+.aa-scrollcue span{width:4px; height:9px; background:#fff; border-radius:2px; animation:cue 1.6s ease-in-out infinite;}
+@keyframes cue{0%{transform:translateY(0); opacity:1;}70%{transform:translateY(12px); opacity:0;}100%{opacity:0;}}
+
+/* buttons */
+.aa-btn{position:relative; display:inline-flex; align-items:center; justify-content:center; gap:8px; cursor:pointer;
+  font-family:'Saira Condensed'; font-weight:700; font-size:16px; letter-spacing:.06em; text-transform:uppercase;
+  padding:14px 28px; border-radius:4px; border:2px solid transparent; transition:.18s; white-space:nowrap; overflow:hidden;}
+.aa-btn.sm{padding:9px 16px; font-size:13.5px;}
+.aa-btn-red{background:var(--redgrad); color:#fff; box-shadow:0 6px 24px rgba(255,43,48,.28);}
+.aa-btn-red:hover{transform:translateY(-2px); box-shadow:0 10px 30px rgba(255,43,48,.42);}
+.aa-btn-red:disabled{opacity:.6; cursor:default; transform:none;}
+.aa-btn-glass{background:rgba(255,255,255,.06); color:#fff; border-color:rgba(255,255,255,.22); backdrop-filter:blur(6px);}
+.aa-btn-glass:hover{border-color:#fff; background:rgba(255,255,255,.12);}
+.aa-btn-dark{background:var(--ink); color:#fff; border-color:var(--ink);}
+.aa-btn-dark:hover{background:#000;}
+.aa-btn-outline{background:transparent; color:var(--ink); border-color:var(--ink);}
+.aa-btn-outline:hover{background:var(--ink); color:#fff;}
+.aa-btn-outline-light{background:transparent; color:#fff; border-color:rgba(255,255,255,.4);}
+.aa-btn-outline-light:hover{border-color:#fff; background:rgba(255,255,255,.08);}
+
+/* marquee */
+.aa-marquee{position:relative; overflow:hidden; background:var(--redgrad); border-top:1px solid rgba(0,0,0,.2); border-bottom:1px solid rgba(0,0,0,.2);}
+.aa-marquee-track{display:flex; width:max-content; animation:marq 32s linear infinite;}
+.aa-marquee:hover .aa-marquee-track{animation-play-state:paused;}
+.aa-mItem{display:inline-flex; align-items:center; font-family:'Saira Condensed'; font-weight:800; font-size:26px;
+  letter-spacing:.04em; text-transform:uppercase; color:#fff; padding:15px 0;}
+.aa-mSlash{display:inline-block; width:8px; height:22px; background:#0a0b0e; transform:skewX(-18deg); margin:0 26px; opacity:.55; border-radius:1px;}
+@keyframes marq{from{transform:translateX(0);} to{transform:translateX(-50%);}}
+
+/* spotlight */
+.aa-spotlight{position:relative; background:linear-gradient(180deg,#0b0d12,#0e1016); overflow:hidden; padding:78px 0;}
+.aa-spot-num{position:absolute; top:-26px; right:-10px; font-family:'Saira Condensed'; font-weight:800; font-size:clamp(120px,20vw,300px);
+  color:#fff; opacity:.025; letter-spacing:.02em; pointer-events:none;}
+.aa-spot-grid{position:relative; display:grid; grid-template-columns:1.05fr .95fr; gap:48px; align-items:center;}
+.aa-spot-media{position:relative; border-radius:12px; overflow:hidden; aspect-ratio:16/11; background:#0e1014; border:1px solid var(--line);
+  box-shadow:0 30px 80px rgba(0,0,0,.5);}
+.aa-spot-media img{width:100%; height:100%; object-fit:cover; transition:transform .6s ease;}
+.aa-spotlight:hover .aa-spot-media img{transform:scale(1.04);}
+.aa-spot-noimg{width:100%; height:100%; display:flex; align-items:center; justify-content:center; color:#2c313b;
+  background:linear-gradient(135deg,#181b22,#0e1014);}
+.aa-spot-flag{position:absolute; top:14px; left:14px; font-family:'Saira Condensed'; font-weight:700; font-size:12.5px;
+  letter-spacing:.08em; text-transform:uppercase; color:#fff; background:var(--redgrad); padding:6px 13px; border-radius:3px;}
+.aa-spot-title{font-family:'Saira Condensed'; font-weight:800; text-transform:uppercase; letter-spacing:.01em;
+  font-size:clamp(32px,4.4vw,52px); line-height:.98; margin:6px 0 0;
+  background:linear-gradient(180deg,#fff 20%,#b9bec8 90%); -webkit-background-clip:text; background-clip:text; color:transparent;}
+.aa-spot-trim{color:var(--mute); font-size:16px; margin:8px 0 0;}
+.aa-spot-price{font-family:'Spline Sans Mono'; font-weight:700; font-size:38px; color:var(--red); margin:16px 0 20px;}
+.aa-spot-specs{display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-bottom:22px;}
+.aa-specbig{background:var(--panel2); border:1px solid var(--line); border-left:3px solid var(--cyan); border-radius:7px; padding:12px 14px; display:flex; flex-direction:column; gap:3px;}
+.aa-specbig-k{font-family:'Saira Condensed'; font-weight:600; font-size:11px; letter-spacing:.12em; text-transform:uppercase; color:var(--mute);}
+.aa-specbig-v{font-family:'Spline Sans Mono'; font-weight:600; font-size:15px; color:#fff;}
+.aa-spot-desc{color:#aeb4c0; font-size:15px; margin:0 0 22px; max-width:520px;}
+
+/* lineup */
+.aa-lineup{background:var(--paper); color:var(--ink); padding:64px 0;}
+.aa-lineup-row{display:flex; gap:12px; overflow-x:auto; padding:4px 0 10px; scrollbar-width:thin;}
+.aa-lineup-item{flex:0 0 auto; width:190px; background:var(--paper); border:1px solid var(--line-l); border-radius:8px;
+  padding:16px 14px 16px; cursor:pointer; text-align:center; transition:.18s; display:flex; flex-direction:column; align-items:center; gap:3px;}
+.aa-lineup-item:hover{border-color:var(--red); transform:translateY(-4px); box-shadow:0 16px 34px rgba(10,11,14,.14);}
+.aa-lineup-img{width:100%; height:100px; display:flex; align-items:center; justify-content:center; color:#c3c7cf; margin-bottom:6px;}
+.aa-lineup-img img{width:100%; height:100%; object-fit:contain;}
+.aa-lineup-name{font-family:'Saira Condensed'; font-weight:700; font-size:17px; letter-spacing:.04em; text-transform:uppercase; color:var(--ink); line-height:1.05;}
+.aa-lineup-sub{font-family:'Spline Sans Mono'; font-size:12px; color:var(--steel-l);}
+.aa-lineup-go{font-family:'Saira Condensed'; font-weight:600; font-size:12.5px; letter-spacing:.08em; text-transform:uppercase; color:var(--red); margin-top:6px; opacity:0; transform:translateY(4px); transition:.18s;}
+.aa-lineup-item:hover .aa-lineup-go{opacity:1; transform:none;}
+
+/* sections (light) */
+.aa-section{padding:80px 0;}
+.aa-inventory{background:var(--mist); color:var(--ink);}
+.aa-sec-head{display:flex; align-items:flex-end; justify-content:space-between; gap:16px; flex-wrap:wrap; margin-bottom:26px;}
+.aa-h2{font-family:'Saira Condensed'; font-weight:800; text-transform:uppercase; letter-spacing:.008em;
+  font-size:clamp(34px,4.6vw,58px); margin:6px 0 0; line-height:.96; color:var(--ink);}
+.aa-h2.chrome{background:linear-gradient(180deg,#fff 12%,#cfd3da 52%,#9aa0ab 60%,#fff 96%); -webkit-background-clip:text; background-clip:text; color:transparent;}
+
+/* controls */
+.aa-controls{display:flex; flex-wrap:wrap; gap:12px; align-items:center; margin-bottom:30px;}
+.aa-search{flex:1; min-width:200px; padding:13px 16px; border:1.5px solid var(--line-l); border-radius:5px; font-size:15px; font-family:inherit; background:var(--paper);}
+.aa-search:focus{outline:none; border-color:var(--ink); box-shadow:0 0 0 3px rgba(10,11,14,.06);}
+.aa-chips{display:flex; gap:6px; flex-wrap:wrap;}
+.aa-chip{padding:11px 17px; border:1.5px solid var(--line-l); background:var(--paper); border-radius:5px;
+  font-family:'Saira Condensed'; font-weight:600; font-size:14px; letter-spacing:.06em; text-transform:uppercase; cursor:pointer; color:var(--steel-l); transition:.15s;}
+.aa-chip:hover{border-color:var(--ink);}
+.aa-chip.on{background:var(--ink); color:#fff; border-color:var(--ink);}
+.aa-select{padding:12px 14px; border:1.5px solid var(--line-l); border-radius:5px; background:var(--paper); font-family:inherit; font-size:14px; cursor:pointer;}
+
+/* grid + cards */
+.aa-grid{display:grid; grid-template-columns:repeat(auto-fill,minmax(320px,1fr)); gap:26px;}
+.aa-card{position:relative; background:var(--paper); border:1px solid var(--line-l); border-radius:9px; overflow:hidden;
+  display:flex; flex-direction:column; transition:transform .2s, box-shadow .2s;}
+.aa-card::after{content:&quot;&quot;; position:absolute; left:0; bottom:0; height:4px; width:0; background:var(--redgrad); transition:.25s;}
+.aa-card:hover{box-shadow:0 22px 50px rgba(10,11,14,.16); transform:translateY(-4px);}
+.aa-card:hover::after{width:100%;}
+.aa-card.feat{border-color:#c7cad0;}
+.aa-card-media{position:relative; aspect-ratio:16/11; background:#0e1014; overflow:hidden;}
+.aa-card-media img{width:100%; height:100%; object-fit:cover; display:block; transition:transform .5s ease;}
+.aa-card:hover .aa-card-media img{transform:scale(1.06);}
+.aa-noimg{width:100%; height:100%; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:10px; color:#3a4049; background:linear-gradient(135deg,#181b22,#0e1014);}
+.aa-noimg span{font-family:'Saira Condensed'; font-weight:600; letter-spacing:.08em; text-transform:uppercase; font-size:12px;}
+.aa-badge{position:absolute; top:12px; left:12px; display:inline-flex; align-items:center; gap:6px;
+  font-family:'Saira Condensed'; font-weight:700; font-size:12px; letter-spacing:.07em; text-transform:uppercase; color:#fff;
+  background:rgba(8,9,12,.82); padding:5px 11px; border-radius:3px; backdrop-filter:blur(2px); z-index:2;}
+.aa-badge i{width:7px; height:7px; border-radius:50%; background:var(--so);}
+.aa-badge.av i{background:var(--av);}
+.aa-badge.pe i{background:var(--pe);}
+.aa-feat-tag{position:absolute; top:12px; right:12px; z-index:2; font-family:'Saira Condensed'; font-weight:700; font-size:12px;
+  letter-spacing:.07em; text-transform:uppercase; color:#fff; background:var(--redgrad); padding:5px 11px; border-radius:3px;}
+.aa-dots{position:absolute; bottom:10px; right:10px; display:flex; gap:6px; z-index:2;}
+.aa-dot{width:8px; height:8px; border-radius:50%; border:none; background:rgba(255,255,255,.5); cursor:pointer; padding:0;}
+.aa-dot.on{background:var(--red);}
+.aa-card-body{padding:18px 18px 20px; display:flex; flex-direction:column; flex:1;}
+.aa-car-title{font-family:'Saira Condensed'; font-weight:700; text-transform:uppercase; letter-spacing:.02em; font-size:24px; margin:0; line-height:1.02; color:var(--ink);}
+.aa-car-trim{margin:2px 0 0; color:var(--steel-l); font-size:14px;}
+.aa-price{font-family:'Spline Sans Mono'; font-weight:700; font-size:26px; color:var(--red-2); margin:12px 0 14px;}
+.aa-specs{display:grid; grid-template-columns:1fr 1fr; gap:8px;}
+.aa-spec{background:var(--mist); border-radius:5px; padding:9px 11px; display:flex; flex-direction:column; gap:2px;}
+.aa-spec-k{font-family:'Saira Condensed'; font-weight:600; font-size:10.5px; letter-spacing:.1em; text-transform:uppercase; color:var(--steel-l);}
+.aa-spec-v{font-family:'Spline Sans Mono'; font-weight:600; font-size:13px; color:var(--ink);}
+.aa-colors{margin:12px 0 0; font-size:13.5px; color:var(--steel-l);}
+.aa-dot-sep{margin:0 7px;}
+.aa-desc{margin:11px 0 0; font-size:14px; color:#4a4e57; display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden;}
+.aa-card-foot{margin-top:auto; padding-top:16px; display:flex; align-items:center; justify-content:space-between; gap:10px;}
+.aa-card-owner{display:flex; gap:6px;}
+.aa-icobtn{font-family:'Saira Condensed'; font-weight:600; font-size:13px; letter-spacing:.05em; text-transform:uppercase; padding:8px 13px; border:1.5px solid var(--line-l); background:var(--paper); border-radius:4px; cursor:pointer; color:var(--ink);}
+.aa-icobtn:hover{border-color:var(--ink);}
+.aa-icobtn.danger{color:var(--red-2); border-color:#f0c9cb;}
+.aa-icobtn.danger:hover{background:var(--red-2); color:#fff; border-color:var(--red-2);}
+.aa-empty{text-align:center; padding:66px 20px; color:var(--steel-l); display:flex; flex-direction:column; align-items:center; gap:14px; background:var(--paper); border:1px solid var(--line-l); border-radius:9px;}
+.aa-empty p{font-family:'Saira Condensed'; font-size:24px; text-transform:uppercase; letter-spacing:.03em; color:var(--ink); margin:0;}
+.aa-empty-sub{max-width:380px; font-size:14.5px;}
+
+/* services */
+.aa-services{position:relative; background:var(--bg); color:#fff; overflow:hidden;}
+.aa-services-slash{position:absolute; top:-10%; right:-70px; width:180px; height:120%; background:var(--redgrad); opacity:.9; clip-path:polygon(46% 0, 62% 0, 16% 100%, 0% 100%);}
+.aa-grid-lines{position:absolute; inset:0; opacity:.5; background-image:linear-gradient(var(--line) 1px,transparent 1px),linear-gradient(90deg,var(--line) 1px,transparent 1px); background-size:60px 60px; mask-image:radial-gradient(70% 60% at 30% 40%,#000,transparent 80%); -webkit-mask-image:radial-gradient(70% 60% at 30% 40%,#000,transparent 80%);}
+.aa-services .aa-wrap{position:relative; z-index:2;}
+.aa-services-lead{max-width:620px; color:#aab0bc; font-size:16.5px; margin:14px 0 38px;}
+.aa-svc-grid{display:grid; grid-template-columns:repeat(auto-fill,minmax(290px,1fr)); gap:16px;}
+.aa-svc{position:relative; background:var(--coal); border:1px solid #242833; border-radius:9px; padding:26px 24px; transition:.2s; overflow:hidden;}
+.aa-svc:hover{border-color:var(--red); transform:translateY(-4px);}
+.aa-svc-edge{position:absolute; left:0; top:0; width:3px; height:0; background:var(--redgrad); transition:.3s;}
+.aa-svc:hover .aa-svc-edge{height:100%;}
+.aa-svc-ico{width:50px; height:50px; border-radius:8px; background:rgba(255,43,48,.13); color:var(--red); display:flex; align-items:center; justify-content:center; margin-bottom:16px; transition:.2s;}
+.aa-svc:hover .aa-svc-ico{background:var(--red); color:#fff; transform:rotate(-6deg);}
+.aa-svc h3{font-family:'Saira Condensed'; font-weight:700; text-transform:uppercase; letter-spacing:.02em; font-size:20px; margin:0 0 8px;}
+.aa-svc p{margin:0; color:#9aa1ae; font-size:14.5px;}
+.aa-svc-cta{margin-top:34px; padding:26px 30px; background:linear-gradient(120deg,#13151b,#191c24); border:1px solid #242833; border-radius:10px;
+  display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:16px;}
+.aa-svc-cta span{font-family:'Saira Condensed'; font-weight:700; font-size:22px; text-transform:uppercase; letter-spacing:.02em;}
+
+/* trust band */
+.aa-trust{background:var(--redgrad); color:#fff;}
+.aa-trust-grid{display:grid; grid-template-columns:repeat(4,1fr); gap:24px; padding:50px 24px;}
+.aa-trust-item{text-align:center; border-right:1px solid rgba(255,255,255,.22);}
+.aa-trust-item:last-child{border-right:none;}
+.aa-trust-n{display:block; font-family:'Spline Sans Mono'; font-weight:700; font-size:clamp(38px,5vw,58px); line-height:1; text-shadow:0 2px 0 rgba(0,0,0,.12);}
+.aa-trust-l{display:block; font-family:'Saira Condensed'; font-weight:600; font-size:13px; letter-spacing:.12em; text-transform:uppercase; margin-top:10px; color:rgba(255,255,255,.9);}
+
+/* visit */
+.aa-visit{background:var(--paper); color:var(--ink);}
+.aa-visit-grid{display:grid; grid-template-columns:1.05fr .95fr; gap:44px; align-items:center;}
+.aa-info{list-style:none; padding:0; margin:18px 0 26px; display:flex; flex-direction:column; gap:14px;}
+.aa-info li{display:flex; flex-direction:column; gap:3px; border-bottom:1px solid var(--line-l); padding-bottom:13px;}
+.aa-info-k{font-family:'Saira Condensed'; font-weight:600; font-size:12px; letter-spacing:.14em; text-transform:uppercase; color:var(--steel-l);}
+.aa-info li a, .aa-info li span:last-child{font-size:17px; color:var(--ink); font-weight:500;}
+.aa-info li a:hover{color:var(--red-2);}
+.aa-visit-card{background:var(--bg); color:#fff; border-radius:12px; padding:36px; border-top:4px solid var(--red); box-shadow:0 24px 60px rgba(10,11,14,.18);}
+.aa-visit-card .aa-logo{color:#fff; margin-bottom:16px;}
+.aa-visit-card p{margin:0; color:#aab0bc; font-size:15.5px;}
+.aa-visit-tags{display:flex; flex-wrap:wrap; gap:8px; margin-top:20px;}
+.aa-visit-tags span{font-family:'Saira Condensed'; font-weight:600; font-size:12.5px; letter-spacing:.06em; text-transform:uppercase; color:#d6d9df; border:1px solid #2a2e38; padding:6px 12px; border-radius:3px;}
+
+/* footer */
+.aa-footer{position:relative; background:var(--bg); color:#fff; padding:54px 0 32px; overflow:hidden;}
+.aa-foot-bigtext{position:absolute; left:0; right:0; bottom:-16px; text-align:center; font-family:'Saira Condensed'; font-weight:800;
+  font-size:clamp(48px,13vw,180px); letter-spacing:.02em; color:#fff; opacity:.03; pointer-events:none; white-space:nowrap;}
+.aa-footrow{position:relative; display:flex; justify-content:space-between; gap:30px; flex-wrap:wrap;}
+.aa-footer .aa-logo{color:#fff; margin-bottom:12px;}
+.aa-foot-sub{margin:4px 0 0; color:#9aa1ae; font-size:14px;}
+.aa-foot-actions{display:flex; flex-direction:column; align-items:flex-end; gap:10px; text-align:right;}
+.aa-owner-tools{display:flex; gap:16px; align-items:center; flex-wrap:wrap; justify-content:flex-end;}
+.aa-owner-on{color:var(--av); font-size:12.5px; font-weight:600;}
+.aa-owner-link{background:none; border:none; color:#9aa1ae; cursor:pointer; font-family:inherit; font-size:14px; text-decoration:underline; text-underline-offset:3px; padding:0;}
+.aa-owner-link:hover{color:var(--red);}
+.aa-foot-copy{color:#565d6b; font-size:12.5px;}
+.aa-storage-note{position:relative; margin-top:22px; padding-top:16px; border-top:1px solid var(--line); color:#7b828f; font-size:12.5px;}
+
+/* reveal */
+[data-reveal]{opacity:0; transform:translateY(26px); transition:opacity .7s cubic-bezier(.2,.7,.2,1), transform .7s cubic-bezier(.2,.7,.2,1);}
+[data-reveal].in{opacity:1; transform:none;}
+
+/* modal */
+.aa-overlay{position:fixed; inset:0; background:rgba(8,9,12,.7); backdrop-filter:blur(4px); display:flex; align-items:flex-start; justify-content:center; padding:40px 16px; z-index:120; overflow:auto;}
+.aa-modal{background:var(--paper); color:var(--ink); border-radius:10px; width:100%; max-width:440px; box-shadow:0 30px 70px rgba(0,0,0,.5); animation:pop .2s ease; border-top:4px solid var(--red);}
+.aa-modal.wide{max-width:720px;}
+@keyframes pop{from{opacity:0; transform:translateY(12px) scale(.98);} to{opacity:1; transform:none;}}
+.aa-modal-head{display:flex; align-items:center; justify-content:space-between; padding:18px 22px; border-bottom:1px solid var(--line-l);}
+.aa-modal-head h3{font-family:'Saira Condensed'; font-weight:700; text-transform:uppercase; letter-spacing:.02em; font-size:22px; margin:0;}
+.aa-x{background:none; border:none; font-size:26px; line-height:1; color:var(--steel-l); cursor:pointer;}
+.aa-modal-body{padding:22px;}
+.aa-modal-sub{margin:0 0 16px; color:var(--steel-l); font-size:14.5px;}
+.aa-modal-foot{display:flex; justify-content:flex-end; gap:10px; margin-top:22px;}
+.aa-lab{display:block; font-family:'Saira Condensed'; font-weight:600; font-size:12px; letter-spacing:.08em; text-transform:uppercase; color:var(--steel-l); margin:14px 0 6px;}
+.aa-field{width:100%; padding:11px 13px; border:1.5px solid var(--line-l); border-radius:6px; font-size:15px; font-family:inherit; background:var(--paper); color:var(--ink);}
+.aa-field.sm{padding:9px 12px; font-size:14px;}
+.aa-field:focus{outline:none; border-color:var(--ink);}
+.aa-textarea{resize:vertical;}
+.aa-err{color:var(--red-2); font-size:13.5px; margin-top:8px; font-weight:500;}
+.aa-form-grid{display:grid; grid-template-columns:1fr 1fr 1fr; gap:12px;}
+.aa-ffield{display:flex; flex-direction:column;}
+.aa-ffield .aa-lab{margin-top:0;}
+.aa-ffield.full{grid-column:1/-1;}
+.aa-toggle{display:flex; align-items:center; gap:9px; font-size:14px; color:var(--ink); cursor:pointer; padding-top:6px;}
+.aa-toggle input{width:18px; height:18px; accent-color:var(--red);}
+.aa-hero-upload{display:flex; gap:10px; flex-wrap:wrap; align-items:center;}
+.aa-hero-preview{margin-top:12px; border:1px solid var(--line-l); border-radius:6px; overflow:hidden; aspect-ratio:16/7;}
+.aa-hero-preview img{width:100%; height:100%; object-fit:cover; display:block;}
+.aa-photo-tools{display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-top:4px;}
+.aa-url-add{display:flex; gap:8px; flex:1; min-width:220px;}
+.aa-thumbs{display:flex; flex-wrap:wrap; gap:10px; margin-top:14px;}
+.aa-thumb{position:relative; width:84px; height:64px; border-radius:5px; overflow:hidden; border:1px solid var(--line-l);}
+.aa-thumb img{width:100%; height:100%; object-fit:cover;}
+.aa-thumb button{position:absolute; top:3px; right:3px; width:20px; height:20px; border-radius:50%; border:none; background:rgba(8,9,12,.8); color:#fff; cursor:pointer; font-size:14px; line-height:1; display:flex; align-items:center; justify-content:center;}
+.aa-thumb-main{position:absolute; bottom:0; left:0; right:0; background:var(--redgrad); color:#fff; font-family:'Saira Condensed'; font-weight:600; font-size:10px; letter-spacing:.08em; text-align:center; padding:2px; text-transform:uppercase;}
+
+/* toast */
+.aa-toast{position:fixed; bottom:24px; left:50%; transform:translateX(-50%); background:var(--ink); color:#fff; padding:13px 24px; border-radius:5px; font-size:14.5px; z-index:140; box-shadow:0 12px 34px rgba(0,0,0,.4); border-left:4px solid var(--red);}
+
+@media (max-width:980px){
+  .aa-nav{display:none;}
+  .aa-spot-grid, .aa-visit-grid{grid-template-columns:1fr; gap:30px;}
+  .aa-trust-grid{grid-template-columns:1fr 1fr; gap:0;}
+  .aa-trust-item{padding:22px 0;}
+  .aa-trust-item:nth-child(2){border-right:none;}
+  .aa-trust-item:nth-child(1),.aa-trust-item:nth-child(2){border-bottom:1px solid rgba(255,255,255,.22);}
+}
+@media (max-width:860px){
+  .aa-hero{min-height:0; padding-top:10px;}
+  .aa-hero-content{padding:54px 0 60px;}
+  .aa-gauges{flex-wrap:wrap;}
+  .aa-form-grid{grid-template-columns:1fr 1fr;}
+  .aa-scrollcue{display:none;}
+}
+@media (max-width:560px){
+  .aa-form-grid{grid-template-columns:1fr;}
+  .aa-foot-actions{align-items:flex-start; text-align:left;}
+  .aa-brand-sub{display:none;}
+  .aa-callbtn span{display:none;}
+  .aa-spot-specs{grid-template-columns:1fr;}
+}
+@media (prefers-reduced-motion:reduce){
+  .aa-root *{animation:none !important; transition:none !important;}
+  [data-reveal]{opacity:1 !important; transform:none !important;}
+  .aa-hero-content &gt; *{opacity:1 !important;}
+}
+`;</pre>
+</body>
+</html>
